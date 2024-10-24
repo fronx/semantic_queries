@@ -31,10 +31,14 @@ if os.path.exists(HISTORY_FILE):
 # Register a function to save history on exit
 atexit.register(readline.write_history_file, HISTORY_FILE)
 
+def add_history(input):
+    if readline.get_current_history_length() == 0 or input != readline.get_history_item(readline.get_current_history_length()):
+        readline.add_history(input)
+
 while True:
     try:
         user_input = input("> ")
-        readline.add_history(user_input)
+        add_history(user_input)
         response = chain.invoke(user_input)
         print(response['result'])
     except EOFError:
