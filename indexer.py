@@ -1,0 +1,108 @@
+import dspy
+from qdrant_client import QdrantClient
+import os
+
+from dotenv import load_dotenv
+load_dotenv()
+
+model = dspy.OpenAI(model='gpt-4o')
+
+qdrant_client = QdrantClient(
+    url=os.getenv("QDRANT_URL"),
+    api_key=os.getenv("QDRANT_KEY"),
+)
+
+import openai
+
+# ---
+
+import json
+import pandas as pd
+import numpy as np
+from qdrant_client.http import models
+from qdrant_client.http.models import Batch
+
+def load_paragraphs():
+    tweets_path = os.path.join('./data', "tweets_with_embeddings.csv")
+    return pd.read_csv(tweets_path, converters={'embedding': json.loads})
+
+def store_paragraphs(paragraphs_df, batch_size=50):
+    num_batches = (len(paragraphs_df) + batch_size - 1) // batch_size
+    batches = np.array_split(paragraphs_df, num_batches)
+
+    for i, paragraphs in enumerate(batches, start=1):
+        print(i, '/', num_batches)
+        filtered_paragraphs = paragraphs[['id', 'full_text', 'account']]
+        payloads = filtered_paragraphs.to_dict(orient='records')
+        vectors = paragraphs['embedding'].to_list()
+
+        qdrant_client.upsert(
+            collection_name="paragraphs",
+            points=Batch(
+                ids=paragraphs['id'].to_list(),
+                payloads=payloads,
+                vectors=vectors,
+            ),
+        )
+
+def create_collection():
+    qdrant_client.create_collection('paragraphs', models.VectorParams(size=1536, distance=models.Distance.COSINE))
+
+def get_relevant_paragraphs(query: str, top_k: int = 20):
+    try:
+        # 
+        encoded_query = openai.embeddings.create(
+            input=[query],
+            engine="text-embedding-3-large").data[0]['embedding']
+
+        result = qdrant_client.search(
+            collection_name='paragraphs',
+            query_vector=encoded_query,
+            limit=top_k,
+        )
+        return result
+
+    except Exception as e:
+        print({e})
+
+# retrieve = dspy.Retrieve(k=7)
+# question = "What is consciousness"
+# topK_passages = get_relevant_tweets(question)
+
+class GenerateAnswer(dspy.Signature):
+    context = dspy.InputField(desc="may contain relevant thoughts")
+    question = dspy.InputField()
+    answer = dspy.OutputField(desc="an answer that mirrors the style of the context")
+
+class RAG(dspy.Module):
+    def __init__(self, num_passages=20):
+        super().__init__()
+
+        self.retrieve = dspy.Retrieve(k=num_passages)
+        self.generate_answer = dspy.ChainOfThought(GenerateAnswer)
+
+    def forward(self, question):
+        context = [ point.payload['full_text'] for point in get_relevant_tweets(question) ]
+        prediction = self.generate_answer(context=context, question=question)
+        return dspy.Prediction(context=context, answer=prediction.answer)
+
+from dspy.teleprompt import BootstrapFewShot
+
+# Validation logic: check that the predicted answer is correct.
+# Also check that the retrieved context does actually contain that answer.
+def validate_context_and_answer(example, pred, trace=None):
+    answer_EM = dspy.evaluate.answer_exact_match(example, pred)
+    answer_PM = dspy.evaluate.answer_passage_match(example, pred)
+    return answer_EM and answer_PM
+
+# Set up a basic teleprompter, which will compile our RAG program.
+teleprompter = BootstrapFewShot(metric=validate_context_and_answer)
+
+trainset = [
+    dspy.Example(question="What is the essential character of flying things?", answer="They are nasty little buggers"),
+    dspy.Example(question="?", answer="They are nasty little buggers"),
+]
+
+# Compile!
+compiled_rag = teleprompter.compile(RAG(), trainset=trainset)
+
