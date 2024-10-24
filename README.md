@@ -15,13 +15,13 @@ open http://localhost:7474
 Or start Neo4j Desktop and go from there.
 You need APOC installed.
 
-# Extract Graph from PDF
+## Extract Graph from PDF
 
 ```
 python pdf_reader.py <pdf-path>
 ```
 
-# Query Graph
+## Query Graph
 
 ```
 python query.py
